@@ -1,7 +1,7 @@
 NEATmap
 ========
 <p align="center">
-<img src="Docs/Html/_images/NEATmap_pipeline.PNG"
+<img src="Docs/Html/_images/NEATmap_pipeline.png"
 height="300">
 </p>
 
