@@ -35,23 +35,23 @@ def get_multi_layer(region_color, image_root, atlas_root, Region_root, Points_Si
             if region_name[i] in no_layer4_region:
                 index = 0
                 for num in range(0, 4):
-                    if index <= 4:
+                    if index == 6:
+                        genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_4[num], color[i][index:])
+                        print('{} region'.format(region_name[i] + layer_name_4[num]))
+                    else:
                         genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_4[num], color[i][index : index + 2])
                         print('{} region'.format(region_name[i] + layer_name_4[num]))
-                        index += 2
-                    else:
-                        genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_4[num], color[i][index: ])
-                        print('{} region'.format(region_name[i] + layer_name_4[num]))
+                    index += 2
             else:
                 index = 0
                 for num in range(0, 5):
-                    if index <= 6:
-                        genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_5[num], color[i][index : index + 2])
-                        print('{} region'.format(region_name[i] + layer_name_5[num]))
-                        index += 2
-                    else:
+                    if index == 8:
                         genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_5[num], color[i][index: ])
                         print('{} region'.format(region_name[i] + layer_name_5[num]))
+                    else:
+                        genSingleRegion(atlas_root ,Region_root, region_name[i] + layer_name_5[num], color[i][index : index + 2])
+                        print('{} region'.format(region_name[i] + layer_name_5[num]))
+                    index += 2
 
 if __name__ == "__main__":
     root = Data_root
