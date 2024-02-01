@@ -9,13 +9,13 @@ height="300">
 
 *NEATmap's* tool box includes functional modules such as data preprocessing, neural network, post-processing, and quantization analysis.
 
-## High-speed volume imaging <img src="Docs/Html/_images/VISoR_imaging.gif" alt="High-speedvolumeimageing" width="150" align="right" vspace = "5"/></a>
+## High-speed volumetric imaging <img src="Docs/Html/_images/VISoR_imaging.gif" alt="High-speedvolumeimageing" width="150" align="right" vspace = "5"/></a>
 
 Single channel imaging in adult mouse within ~0.5 hours. (Voxel size 1 x 1 x 3.5 $μm^3$)
 
-## Highly accurate whole-brain automatic segmentation <img src="Docs/Html/_images/segmentation.gif" alt="High-speedvolumeimageing" width="150" align="right" vspace = "5"/></a>
+## High-precision whole-brain automatic segmentation <img src="Docs/Html/_images/segmentation.gif" alt="High-speedvolumeimageing" width="150" align="right" vspace = "5"/></a>
 
-Complete whole-brain volume image segmentation in ~20 minutes.
+Complete whole-brain volumetric image segmentation in ~20 minutes.
 
 ## Whole brain and hierarchical brain regions analysis
 
@@ -35,7 +35,7 @@ height=150>
 
 *NEATmap* was designed to analyze volumetric images imaged by [VISoR](https://github.com/BilabOptics/VISoR_code/) light-sheet microscopy.
 
-*NEATmap* tools can also be used to analyze data from other microscopy imaging, where neural networks can replace other networks that can be fed into the volume image.
+*NEATmap* tools can also be used to analyze data from other microscopy imaging, where neural networks can replace other networks that can be fed into the volumetric image.
 
 ## Application
 
