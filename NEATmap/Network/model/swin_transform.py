@@ -591,31 +591,32 @@ class SwinTransformer(nn.Module):
         # build decoder layers
         self.layers_up = nn.ModuleList()
         self.concat_back_dim = nn.ModuleList()
+        self.depths_up = (2, 6, 2, 2)
         # concat_linear_num = [576,264,144,72]
         for i_layer in range(self.num_layers):
             concat_linear = nn.Linear(int(1.5 * embed_dim*2**(self.num_layers-1-i_layer)),
             int(embed_dim*2**(self.num_layers-1-i_layer))) if i_layer > 0 else nn.Identity()
             # concat_linear = nn.Linear(concat_linear_num[i_layer-1], concat_linear_num[i_layer]) if i_layer > 0 else nn.Identity() 
-            if i_layer ==0 :
-                layer_up = PatchExpand(input_resolution=(self.patch_grid[0] // (2 ** (self.num_layers-1-i_layer)),
-                self.patch_grid[1] // (2 ** (self.num_layers-1-i_layer)), self.patch_grid[2] // (2 ** (self.num_layers-1-i_layer))), 
-                dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)), dim_scale=4, norm_layer=norm_layer)
-            else:
-                layer_up = BasicLayer_up(dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)),
-                                input_resolution=(self.patch_grid[0] // (2 ** (self.num_layers-1-i_layer)),
-                                                  self.patch_grid[1] // (2 ** (self.num_layers-1-i_layer)),
-                                                  self.patch_grid[2] // (2 ** (self.num_layers-1-i_layer))),
-                                depth=depths[(self.num_layers-1-i_layer)],
-                                num_heads=num_heads[(self.num_layers-1-i_layer)],
-                                window_size=window_size,
-                                mlp_ratio=self.mlp_ratio,
-                                qkv_bias=qkv_bias,
-                                drop=drop_rate,
-                                attn_drop=attn_drop_rate,
-                                drop_path=dpr[sum(depths[:(self.num_layers-1-i_layer)]):sum(depths[:(self.num_layers-1-i_layer) + 1])],
-                                norm_layer=norm_layer,
-                                upsample=PatchExpand if (i_layer < self.num_layers - 1) else None,
-                                use_checkpoint=use_checkpoint)
+            # if i_layer ==0 :
+            #     layer_up = PatchExpand(input_resolution=(self.patch_grid[0] // (2 ** (self.num_layers-1-i_layer)),
+            #     self.patch_grid[1] // (2 ** (self.num_layers-1-i_layer)), self.patch_grid[2] // (2 ** (self.num_layers-1-i_layer))), 
+            #     dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)), dim_scale=4, norm_layer=norm_layer)
+            # else:
+            layer_up = BasicLayer_up(dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)),
+                            input_resolution=(self.patch_grid[0] // (2 ** (self.num_layers-1-i_layer)),
+                                                self.patch_grid[1] // (2 ** (self.num_layers-1-i_layer)),
+                                                self.patch_grid[2] // (2 ** (self.num_layers-1-i_layer))),
+                            depth=self.depths_up[(self.num_layers-1-i_layer)],
+                            num_heads=num_heads[(self.num_layers-1-i_layer)],
+                            window_size=window_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias,
+                            drop=drop_rate,
+                            attn_drop=attn_drop_rate,
+                            drop_path=dpr[sum(self.depths_up[:(self.num_layers-1-i_layer)]):sum(self.depths_up[:(self.num_layers-1-i_layer) + 1])],
+                            norm_layer=norm_layer,
+                            upsample=PatchExpand if (i_layer < self.num_layers - 1) else None,
+                            use_checkpoint=use_checkpoint)
             self.layers_up.append(layer_up)
             self.concat_back_dim.append(concat_linear)
 
