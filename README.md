@@ -63,7 +63,13 @@ Tutorials for NEATmap are avaiable as [jupyer](https://jupyter.org/) notebooks:
 The mouse whole brain dataset is available for download at [Zenodo](https://zenodo.org/record/8133486).
 
 ## References
-  ### Unpublished
-  NEATmap: a high-efficiency deep learning approach for whole mouse brain neuronal activity trace mapping submitted to *National Science Review*.
+    @article{zheng2024neatmap,
+      title={NEATmap: a high-efficiency deep learning approach for whole mouse brain neuronal activity trace mapping},
+      author={Zheng, Weijie and Mu, Huawei and Chen, Zhiyi and Liu, Jiajun and Xia, Debin and Cheng, Yuxiao and Jing, Qi and Lau, Pak-Ming and Tang, Jin and Bi, Guo-Qiang and others},
+      journal={National Science Review},
+      pages={nwae109},
+      year={2024},
+      publisher={Oxford University Press}
+    }
 ## License
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
