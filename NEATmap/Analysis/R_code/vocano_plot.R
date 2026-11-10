@@ -1,5 +1,5 @@
 library(ggplot2)
-setwd("R:/WeijieZheng/Social_defeat_csv")
+setwd("")
 
 data <- read.csv("I_O_difference_level6.csv")
 ggplot(data, aes(log2FoldChange, -log10(pValue)))+
