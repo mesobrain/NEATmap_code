@@ -1,6 +1,6 @@
 library(ggplot2)
 library(readr)
-setwd('R:/WeijieZheng/Social_defeat_csv')
+setwd('')
 
 data <- read_csv('sds_es_corr.csv', show_col_types = FALSE)
 ggplot()+
