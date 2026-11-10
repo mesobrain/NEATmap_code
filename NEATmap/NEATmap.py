@@ -561,10 +561,3 @@ if __name__ == "__main__":
     obser_name = Stats['Observe_data_list'] 
     con_name = Stats['Ctrl_data_list']
     lc.log2change(root, exp_name, obser_name, con_name) 
-
-    """
-        Calculate the spearman's correlation.
-    """
-    data_root = Data_root
-    save_root = Data_root
-    sc.spearman_corr(data_root, save_root)
