@@ -3,10 +3,9 @@ import os
 
 data_name = '150819_0_8X-cfos_16-55-11'
 name = data_name.split('_')
-if len(name) == 6:
-    name_seg = name[1] + str('_') + name[2] + str('_') + name[3] + str('_') + name[4] + str('_') + name[5]
-else:
-    print('Recheck the name of the data')
+if len(name) < 2 or any(not part for part in name):
+    raise ValueError('data_name must contain a non-empty date and sample suffix separated by underscores')
+name_seg = '_'.join(name[1:])
 Raw_data_root = r'G:\cyx/' + data_name + '/Reconstruction/BrainImage/4.0'
 # Data_root = r'R:\WeijieZheng\Data_proc_' + data_name
 Data_root = r'R:\WeijieZheng\Haloperidol\haloperidol\1269' + data_name
@@ -201,7 +200,7 @@ Spot_map['group_num'] = 6.25
 Spot_map['filter_area_lower'] = 1
 Spot_map['filter_area_upper'] = 27
 
-freesia_export_path = r'R:\WeijieZheng\Model_'+ name_seg +'_seg_pre\whole_brain_cell_counts'
+freesia_export_path = r'R:\WeijieZheng\Model_'+ name_seg + r'_seg_pre\whole_brain_cell_counts'
 Region_mask = {
     'Hippo': [914, 915, 924, 925, 934, 935, 948, 949, 950, 951, 952, 953],
     'Central_amy_nuc': [846, 847, 848, 849, 851, 854, 855, 864, 865, 876, 877],

@@ -1,30 +1,29 @@
-from Environment import *
-from Parameter import *
+import csv
+import os
+
+import numpy as np
+import pandas as pd
+import tifffile
+from scipy import ndimage as ndi
+
+from Parameter import Stats
 
 def volume_ratio(region_path, label_path, region_name, min_volume=Stats['min_volume'], max_volume=Stats['max_volume']):
 
     '''volume ratio (computed as (total plaque volume in the region)/(region volume))'''
     region = tifffile.imread(os.path.join(region_path, 'Region_' + region_name + '.tif'))
     label = tifffile.imread(os.path.join(label_path, 'Points_Region_' + region_name + '.tif'))
+    if region.ndim != 3 or label.shape != region.shape:
+        raise ValueError('Region and label must be matching three-dimensional images')
+    if min_volume < 0 or max_volume < min_volume:
+        raise ValueError('Expected 0 <= min_volume <= max_volume')
     struct = ndi.generate_binary_structure(3,1)
     label, _ = ndi.label(label, struct)
-    unique, counts = np.unique(label, return_counts=True)
-    # _, region_counts = np.unique(region_label, return_counts=True)
-    _, _, x = np.where(region==255)
-    region_counts = len(x)
-    small, medium, large = [], [], []
-    for uq, ct in zip(unique, counts):
-        if uq == 0:
-            continue # skip zero!
-        if ct <= min_volume:
-            small.append([uq, ct]) # if object is smaller than mimimum size, it gets excluded
-        elif min_volume < ct <= max_volume:
-            medium.append([uq, ct] )
-        else:
-            large.append([uq, ct])
-    volumes = [e[1] for e in medium]
+    counts = np.bincount(label.ravel())[1:]  # Label 0 is background.
+    volumes = counts[(counts > min_volume) & (counts <= max_volume)]
+    region_counts = np.count_nonzero(region == 255)
     if region_counts != 0:
-        ratios = (sum(volumes) / region_counts) * 100
+        ratios = (volumes.sum() / region_counts) * 100
         ratios = np.round(ratios, 2)
     else:
         ratios = 0 
@@ -48,6 +47,7 @@ def get_volume_ratio_csv(region_color, region_path, label_path, save_csv_root):
 
 def get_whole_layer_volume(region_color, layer_path, layer_points_path, savecsv):
     region_name = list(region_color.keys())
+    os.makedirs(savecsv or os.curdir, exist_ok=True)
     csv_name = 'layer_volume.csv'
     csv_root = os.path.join(savecsv, csv_name)
     first_line = ['Region_name', 'layer 1', 'layer 2_3', 'layer 4', 'layer 5', 'layer 6']
@@ -70,47 +70,37 @@ def get_whole_layer_volume(region_color, layer_path, layer_points_path, savecsv)
             print('finished {}'.format(region_name[i]))
 
 def get_whole_layer_mean_volume(root, data_name, region_color, save_csv, group_name):
-
-    region_num = len(list(region_color.keys()))
-    layer1_array = np.zeros((region_num, len(data_name)))
-    layer2_3_array = np.zeros((region_num, len(data_name)))
-    layer4_array = np.zeros((region_num, len(data_name)))
-    layer5_array = np.zeros((region_num, len(data_name)))
-    layer6_array = np.zeros((region_num, len(data_name)))
-
-    for i in range(len(data_name)):
-        file = open(os.path.join(root, data_name[i], 'whole_brain_cell_counts/layer_volume.csv'))
-        df = pd.read_csv(file)
-        layer1 = df['layer 1']
-        layer2_3 = df['layer 2_3']
-        layer4 = df['layer 4']
-        layer5 = df['layer 5']
-        layer6 = df['layer 6']
-        layer1_array[:, i] = layer1
-        layer2_3_array[:, i] = layer2_3
-        layer4_array[:, i] = layer4
-        layer5_array[:, i] = layer5
-        layer6_array[:, i] = layer6
-
-    mean_layer1 = np.mean(layer1_array, axis=1)
-    mean_layer2_3 = np.mean(layer2_3_array, axis=1)
-    mean_layer4 = np.mean(layer4_array, axis=1)
-    mean_layer5 = np.mean(layer5_array, axis=1)
-    mean_layer6 = np.mean(layer6_array, axis=1)
-
+    if not len(data_name):
+        raise ValueError('At least one sample is required to calculate mean volume')
+    region_names = list(region_color.keys())
+    columns = ['layer 1', 'layer 2_3', 'layer 4', 'layer 5', 'layer 6']
+    totals = np.zeros((len(region_names), len(columns)), dtype=float)
+    for sample in data_name:
+        csv_path = os.path.join(root, sample, 'whole_brain_cell_counts', 'layer_volume.csv')
+        frame = pd.read_csv(csv_path)
+        if 'Region_name' in frame.columns:
+            if frame['Region_name'].duplicated().any():
+                raise ValueError('Duplicate region names in {}'.format(csv_path))
+            frame = frame.set_index('Region_name')
+            missing = [name for name in region_names if name not in frame.index]
+            if missing:
+                raise ValueError('Missing regions in {}: {}'.format(csv_path, missing))
+            frame = frame.loc[region_names]
+        elif len(frame) != len(region_names):
+            raise ValueError('Region count does not match {}'.format(csv_path))
+        totals += frame[columns].values
+    means = np.round(totals / len(data_name), 2)
+    os.makedirs(save_csv or os.curdir, exist_ok=True)
     csv_name = group_name + '_mean_volume.csv'
     csv_root = os.path.join(save_csv, csv_name)
-    values = pd.DataFrame(columns=['Region_name', 'layer1', 'layer2_3', 'layer4', 'layer5', 'layer6'])
-    values['Region_name'] = list(region_color.keys())
-    values['layer1'] = np.round(mean_layer1, 2)
-    values['layer2_3'] = np.round(mean_layer2_3, 2)
-    values['layer4'] = np.round(mean_layer4, 2)
-    values['layer5'] = np.round(mean_layer5, 2)
-    values['layer6'] = np.round(mean_layer6, 2)
+    values = pd.DataFrame(means, columns=['layer1', 'layer2_3', 'layer4', 'layer5', 'layer6'])
+    values.insert(0, 'Region_name', region_names)
     values.to_csv(csv_root, index=False)
     print('finishe {} mean volume'.format(group_name))
 
 if __name__ == "__main__":
+    from Parameter import Data_root, Isocortex
+
     root = Data_root
     data_name = Stats['group_data_name']
 
@@ -130,4 +120,4 @@ if __name__ == "__main__":
 
     ctrl_name = Stats['Ctrl_data_list']
     fs_name = Stats['FST_data_list']
-    get_whole_layer_mean_volume(root, ctrl_name, Isocortex, save_csv=root, group_name='Ctrl') 
+    get_whole_layer_mean_volume(root, ctrl_name, Isocortex, save_csv=root, group_name='Ctrl')

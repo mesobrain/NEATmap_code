@@ -68,7 +68,6 @@ import Analysis.Position_stats as ps
 import Analysis.Statistics as stat
 import Analysis.Volume_ratio as vr
 import Analysis.log2Change as lc
-import Analysis.spearman_corr as sc
 
 __all__ = ['os', 'sys', 'tifffile', 'csv', 'time', 'tempfile', 'itk',
             'copy', 're', 'json', 'shutil', 'yaml', 'tarfile',
@@ -78,4 +77,4 @@ __all__ = ['os', 'sys', 'tifffile', 'csv', 'time', 'tempfile', 'itk',
             'wt', 'train', 'test', 'infer_whole', 'sl', 'rt',
             'post', 'br', 's3t2', 'st', 'ct', 'cz',
             'ds', 'fb', 'rl', 'it', 'pv', 'ps', 'stat', 
-            'vr', 'lc', 'sc']
+            'vr', 'lc']

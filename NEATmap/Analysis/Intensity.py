@@ -1,182 +1,138 @@
-# from Environment import *
-# from Parameter import *
+import csv
+import os
+
 import numpy as np
 import pandas as pd
-import tifffile, os, csv
+import tifffile
 from scipy import ndimage as ndi
 Stats = {}
 Stats['min_volume'] = 2
 Stats['max_volume'] = 64
 
-def get_local_voxels(block, zc, yc, xc, rad ):
-    """
-    """
-    xst = xc-rad if xc-rad>=0 else 0
-    yst = yc-rad if yc-rad>=0 else 0
-    zst = zc-rad if zc-rad>=0 else 0
-    xen = xc+rad+1 if xc+rad+1<=block.shape[2] else block.shape[2]
-    yen = yc+rad+1 if yc+rad+1<=block.shape[1] else block.shape[1]
-    zen = zc+rad+1 if zc+rad+1<=block.shape[0] else block.shape[0]
+def _local_voxels(block, coordinates, radius):
+    if block.ndim != len(coordinates):
+        raise ValueError('Coordinates do not match the image dimensions')
+    if not isinstance(radius, (int, np.integer)) or radius < 0:
+        raise ValueError('Neighborhood radius must be a nonnegative integer')
+    slices = []
+    for center, size in zip(coordinates, block.shape):
+        if not isinstance(center, (int, np.integer)) or not 0 <= center < size:
+            raise ValueError('Neighborhood center must be an integer inside the image')
+        slices.append(slice(max(center - radius, 0), min(center + radius + 1, size)))
+    return block[tuple(slices)]
 
-    return block[ zst:zen, yst:yen, xst:xen ]
+
+def get_local_voxels(block, zc, yc, xc, rad):
+    """Return a clipped neighborhood view without copying the image."""
+    return _local_voxels(block, (zc, yc, xc), rad)
 
 def get_intensity(blk, label, obj_id, arr_idx,
                     mode='max', max_rad=1, min_rad=4, min_percentile=5):
-    """
-    """
-    block = blk.copy()
-    c0, c1, c2 = arr_idx
-
-    # compute bagkground level
-    local = get_local_voxels( block, c0, c1, c2, min_rad )
-    bg = np.percentile(local, min_percentile )
-
-    if mode=='max':
-        local = get_local_voxels( block, c0, c1, c2, max_rad )
-        sig = local.max()
-    elif mode=='local_mean':
-        local = get_local_voxels( block, c0, c1, c2, max_rad )
-        sig = local.mean()
-    elif mode=='obj_mean':
-        sig = ndi.mean( block, label, obj_id )
-
-    #compute delta
-    delta = sig - bg
-    if delta < 0:
-        delta = 0
-
-    return delta, bg
+    """Return background-subtracted signal and the local background estimate."""
+    return _get_intensity(blk, label, obj_id, arr_idx, mode,
+                          max_rad, min_rad, min_percentile)
 
 def intensity(data_path, label_path, region_name, save_csv_root, id, min_volume=Stats['min_volume'], max_volume=Stats['max_volume']):
-
     image = tifffile.imread(os.path.join(data_path, id + '_whole_brain_25mic.tif'))
     label = tifffile.imread(os.path.join(label_path, 'Points_Region_' + region_name + '.tif'))
-    raw = image.copy()
-    struct = ndi.generate_binary_structure(3,1)
-    label, _ = ndi.label(label, struct)
-    unique, counts = np.unique(label, return_counts=True)
-    small, medium, large = [], [], []
-    for uq, ct in zip(unique, counts):
-        if uq == 0:
-            continue # skip zero!
-        if ct <= min_volume:
-            small.append([uq, ct]) # if object is smaller than mimimum size, it gets excluded
-        elif min_volume < ct <= max_volume:
-            medium.append([uq, ct] )
-        else:
-            large.append([uq, ct])
-    detected_object = []
-    object_ids = [e[0] for e in medium]
-    volumes = [e[1] for e in medium]
-    if object_ids: # skip if empty
-        center_mass = ndi.center_of_mass(raw, label, object_ids )
-        coms = np.array(center_mass).round().astype(np.int)
-        for i, com in enumerate(coms):
-            this_idx = object_ids[i]
-            deltaI, bg = get_intensity(raw, label, this_idx, com, mode='max')
-            vol = volumes[i]
-            obj = [com[2], com[1], com[0], bg, bg + deltaI, vol] # X, Y, Z, intensity, volume
-            detected_object.append(obj)
-    csv_name = region_name + '_intensity.csv'
-    csv_path = os.path.join(save_csv_root, csv_name)
-    list_name = ['X', 'Y', 'Z', 'bg_percentile', 'intensity', 'volume']
-    with open(csv_path,'w+',newline='')as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(list_name)
-        for k in range(len(detected_object)):
-            csv_write.writerow(detected_object[k])
-    return print('Finished ' + region_name)
+    if image.ndim != 3:
+        raise ValueError('Whole-brain intensity requires a three-dimensional image')
+    rows = _measure_intensity(image, label, min_volume, max_volume)
+    _write_intensity_csv(save_csv_root, region_name + '_intensity.csv', rows, 3)
+    print('Finished ' + region_name)
 
-def get_2d_local_voxels(block, yc, xc, rad ):
-    """
-    """
-    xst = xc-rad if xc-rad>=0 else 0
-    yst = yc-rad if yc-rad>=0 else 0
-    xen = xc+rad+1 if xc+rad+1<=block.shape[1] else block.shape[1]
-    yen = yc+rad+1 if yc+rad+1<=block.shape[0] else block.shape[0]
-
-    return block[ yst:yen, xst:xen ]
+def get_2d_local_voxels(block, yc, xc, rad):
+    """Return a clipped two-dimensional neighborhood view."""
+    return _local_voxels(block, (yc, xc), rad)
 
 def get_2d_intensity(blk, label, obj_id, arr_idx,
                     mode='max', max_rad=1, min_rad=4, min_percentile=5):
-    """
-    """
-    block = blk.copy()
-    c0, c1 = arr_idx
+    """Return background-subtracted signal for a two-dimensional patch."""
+    return _get_intensity(blk, label, obj_id, arr_idx, mode,
+                          max_rad, min_rad, min_percentile)
 
-    # compute bagkground level
-    local = get_2d_local_voxels( block, c0, c1, min_rad )
-    bg = np.percentile(local, min_percentile )
 
-    if mode=='max':
-        local = get_2d_local_voxels( block, c0, c1, max_rad )
-        sig = local.max()
-    elif mode=='local_mean':
-        local = get_2d_local_voxels( block, c0, c1, max_rad )
-        sig = local.mean()
-    elif mode=='obj_mean':
-        sig = ndi.mean( block, label, obj_id )
+def _get_intensity(blk, label, obj_id, arr_idx, mode,
+                   max_rad, min_rad, min_percentile):
+    block = np.asarray(blk)
+    if mode not in ('max', 'local_mean', 'obj_mean'):
+        raise ValueError('Unknown intensity mode: {}'.format(mode))
+    bg = np.percentile(_local_voxels(block, arr_idx, min_rad), min_percentile)
+    if mode == 'obj_mean':
+        sig = ndi.mean(block, label, obj_id)
+    else:
+        local = _local_voxels(block, arr_idx, max_rad)
+        sig = local.max() if mode == 'max' else local.mean()
+    return max(sig - bg, 0), bg
 
-    #compute delta
-    delta = sig - bg
-    if delta < 0:
-        delta = 0
 
-    return delta, bg
+def _measure_intensity(image, mask, min_volume, max_volume):
+    if image.shape != mask.shape or image.ndim not in (2, 3):
+        raise ValueError('Image and label must have matching two- or three-dimensional shapes')
+    if min_volume < 0 or max_volume < min_volume:
+        raise ValueError('Expected 0 <= min_volume <= max_volume')
+    labels, _ = ndi.label(mask, ndi.generate_binary_structure(image.ndim, 1))
+    counts = np.bincount(labels.ravel())
+    counts[0] = 0
+    object_ids = np.flatnonzero((counts > min_volume) & (counts <= max_volume))
+    if not len(object_ids):
+        return []
+    with np.errstate(divide='ignore', invalid='ignore'):
+        centers = np.asarray(ndi.center_of_mass(image, labels, object_ids))
+    rounded = np.rint(centers)
+    valid = np.isfinite(rounded).all(axis=1)
+    valid &= ((rounded >= 0) & (rounded < np.asarray(image.shape))).all(axis=1)
+    if not valid.all():
+        # A zero-signal object has no intensity-weighted center. Using its
+        # constant positive component label yields the geometric center.
+        rounded[~valid] = np.rint(ndi.center_of_mass(labels, labels, object_ids[~valid]))
+    centers = rounded.astype(np.intp)
+    rows = []
+    for object_id, center in zip(object_ids, centers):
+        delta, background = _get_intensity(image, labels, object_id, center,
+                                           'max', 1, 4, 5)
+        rows.append(list(center[::-1]) + [background, background + delta, counts[object_id]])
+    return rows
+
+
+def _write_intensity_csv(save_path, filename, rows, ndim):
+    os.makedirs(save_path or os.curdir, exist_ok=True)
+    coordinates = ['X', 'Y', 'Z'][:ndim]
+    with open(os.path.join(save_path, filename), 'w', newline='') as output:
+        writer = csv.writer(output, dialect='excel')
+        writer.writerow(coordinates + ['bg_percentile', 'intensity', 'volume'])
+        writer.writerows(rows)
 
 def patch_intensity(data_path, label_path, image_name, label_name, save_csv_root, min_volume=2, max_volume=64):
     image = tifffile.imread(os.path.join(data_path, image_name))
     label = tifffile.imread(os.path.join(label_path, label_name))
-    raw = image.copy()
-    struct = ndi.generate_binary_structure(2, 1)
-    label, _ = ndi.label(label, struct)
-    unique, counts = np.unique(label, return_counts=True)
-    small, medium, large = [], [], []
-    for uq, ct in zip(unique, counts):
-        if uq == 0:
-            continue # skip zero!
-        if ct <= min_volume:
-            small.append([uq, ct]) # if object is smaller than mimimum size, it gets excluded
-        elif min_volume < ct <= max_volume:
-            medium.append([uq, ct] )
-        else:
-            large.append([uq, ct])
-    detected_object = []
-    object_ids = [e[0] for e in medium]
-    volumes = [e[1] for e in medium]
-    if object_ids: # skip if empty
-        center_mass = ndi.center_of_mass(raw, label, object_ids )
-        coms = np.array(center_mass).round().astype(np.int)
-        for i, com in enumerate(coms):
-            this_idx = object_ids[i]
-            deltaI, bg = get_2d_intensity(raw, label, this_idx, com, mode='max')
-            vol = volumes[i]
-            obj = [com[1], com[0], bg, bg + deltaI, vol] # X, Y, Z, intensity, volume
-            detected_object.append(obj)
-    csv_name = 'patch_intensity.csv'
-    csv_path = os.path.join(save_csv_root, csv_name)
-    list_name = ['X', 'Y', 'bg_percentile', 'intensity', 'volume']
-    with open(csv_path,'w+',newline='')as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(list_name)
-        for k in range(len(detected_object)):
-            csv_write.writerow(detected_object[k])
-    return print('Finished ')
+    if image.ndim != 2:
+        raise ValueError('Patch intensity requires a two-dimensional image')
+    rows = _measure_intensity(image, label, min_volume, max_volume)
+    _write_intensity_csv(save_csv_root, 'patch_intensity.csv', rows, 2)
+    print('Finished ')
 
 def get_intensity_csv(region_color, data_path, label_path, save_csv_root, id='FS10'):
 
-    os.makedirs(save_csv_root, exist_ok=True)
+    os.makedirs(save_csv_root or os.curdir, exist_ok=True)
     region_name = list(region_color.keys())
-    for i in range(len(region_name)):
-        intensity(data_path, label_path, region_name=region_name[i], save_csv_root=save_csv_root, id=id)
+    if not region_name:
+        return
+    image = tifffile.imread(os.path.join(data_path, id + '_whole_brain_25mic.tif'))
+    if image.ndim != 3:
+        raise ValueError('Whole-brain intensity requires a three-dimensional image')
+    for name in region_name:
+        label = tifffile.imread(os.path.join(label_path, 'Points_Region_' + name + '.tif'))
+        rows = _measure_intensity(image, label, Stats['min_volume'], Stats['max_volume'])
+        _write_intensity_csv(save_csv_root, name + '_intensity.csv', rows, 3)
+        print('Finished ' + name)
 
 def normalized_counts(region_color, intensity_root, savepath):
     region_name = list(region_color.keys())
     os.makedirs(savepath, exist_ok=True)
     for i in range(len(region_name)):
         csv_path = os.path.join(intensity_root, region_name[i] + '_intensity.csv')
-        file = open(csv_path)
-        df = pd.read_csv(file)
+        df = pd.read_csv(csv_path)
         intensity = df['intensity'].values
         # intensity_range = (intensity.min(), intensity.max())
         intensity_range = (180, 780)
@@ -193,13 +149,11 @@ def normalized_counts(region_color, intensity_root, savepath):
 
 def get_whole_norm_counts(path, region_color, csv_name):
     ''' Obtained Normalized counts of partial cortical regions '''
-    region_name = os.listdir(path)
     csv_path = os.path.join(path, '..', csv_name )
     first_line = list(region_color.keys())
     values = pd.DataFrame(columns=first_line)
     for i in range(len(first_line)):
-        file = open(os.path.join(path, region_name[i]))
-        df = pd.read_csv(file)
+        df = pd.read_csv(os.path.join(path, first_line[i] + '.csv'))
 
         norm_count = df['normalized_count'].values
         values[first_line[i]] = norm_count

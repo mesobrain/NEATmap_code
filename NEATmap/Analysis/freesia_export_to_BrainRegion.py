@@ -1,66 +1,149 @@
-from Environment import *
-from Splice_post.utils import segmentation_quick_view
-from Parameter import *
+"""Atlas and point exports using slice-wise operations and bounded memory."""
+import os
+import shutil
+
+import numpy as np
+import tifffile
+
+
+def _tiff_files(root):
+    files = sorted(name for name in os.listdir(root)
+                   if name.lower().endswith(('.tif', '.tiff'))
+                   and os.path.isfile(os.path.join(root, name)))
+    if not files:
+        raise ValueError('No TIFF images found in {}'.format(root))
+    return files
+
+
+def _read_plane(path, shape=None):
+    plane = tifffile.imread(path)
+    if plane.ndim != 2 or (shape is not None and plane.shape != shape):
+        raise ValueError('Expected a 2-D image of shape {}, found {} in {}'.format(shape, plane.shape, path))
+    return plane
+
 
 def concat_image(path, save_path, z_num, save_name):
-
+    if int(z_num) != z_num or z_num <= 0:
+        raise ValueError('z_num must be a positive integer.')
+    z_num = int(z_num)
+    paths = [os.path.join(path, '{:04d}_25.tif'.format(index)) for index in range(z_num)]
+    available = next((filename for filename in paths if os.path.isfile(filename)), None)
+    shape = _read_plane(available).shape if available else (400, 560)
+    volume = np.zeros((z_num,) + shape, dtype=np.uint16)
+    for index, filename in enumerate(paths):
+        if os.path.isfile(filename):
+            volume[index] = _read_plane(filename, shape)
+        print('finished {} image'.format(index))
     os.makedirs(save_path, exist_ok=True)
-    concat_image = []
-    for i in range(z_num):
-        if not os.path.exists(os.path.join(path, '{:04d}_25.tif'.format(i))):
-            array = np.zeros((400, 560)).astype('uint16')
-            tifffile.imwrite(os.path.join(path, '{:04d}_25.tif'.format(i)), array)
-        else:
-            image = sitk.ReadImage(os.path.join(path, '{:04d}_25.tif'.format(i)))
-            array = sitk.GetArrayFromImage(image)
-        concat_image.append(array)
-        print('finished {} image'.format(i))
-    concat_image = np.array(concat_image)
-    save_image = sitk.GetImageFromArray(concat_image)
-    sitk.WriteImage(save_image, os.path.join(save_path, save_name + '.tif'))
+    # Missing slices remain zero in the output; the source directory is not modified.
+    tifffile.imwrite(os.path.join(save_path, save_name + '.tif'), volume,
+                     photometric='minisblack')
+
 
 def getMaskSinge(image):
+    """Replace point markers with the modal valid 8-neighbour atlas label.
+
+    Interior tie-breaking and sequential replacement match the original code.
+    Border neighbours are clipped to the image instead of wrapping or raising.
     """
-    Process single image, Get atlas from freessia export, remove points.
-    :param image:
-    :return:
-    """
-    atlas_mask = image
-    x,y = np.where(atlas_mask==1000)
-    # print(x,y)
-    neighbor_8 = [(0,-1),(0,1), (1,0),(1,1),(1,-1), (-1,0),(-1,-1),(-1,1)]
-    for i in range(len(x)):
-        xx = x[i]
-        yy = y[i]
-        bg = []
-        for neighbor in neighbor_8:
-            # print(neighbor[0],neighbor[1])
-            bgs = atlas_mask[xx+neighbor[0]][yy+neighbor[1]]
-            # print(bgs)
-            bg.append(bgs)
-        counts = np.bincount(bg)
-        a = np.argmax(counts)
-        atlas_mask[xx][yy] = a
-        # print(a)
-    return atlas_mask
+    atlas = np.array(image, copy=True)
+    if atlas.ndim != 2:
+        raise ValueError('Atlas images must be two-dimensional.')
+    height, width = atlas.shape
+    neighbors = [(0, -1), (0, 1), (1, 0), (1, 1), (1, -1),
+                 (-1, 0), (-1, -1), (-1, 1)]
+    for row, column in zip(*np.where(atlas == 1000)):
+        values = [atlas[row + dr, column + dc] for dr, dc in neighbors
+                  if 0 <= row + dr < height and 0 <= column + dc < width]
+        if values:
+            labels, counts = np.unique(values, return_counts=True)
+            atlas[row, column] = labels[np.argmax(counts)]
+        else:
+            atlas[row, column] = 0
+    return atlas
+
 
 def regenAtlas(image_root):
-    """
-        Get atlas from freessia export, remove points.
-        :param image:
-        :return:
-        """
-    atlas_root = os.path.join(image_root,'..','atlas')
-    image_list = os.listdir(image_root)
-    if not os.path.exists(atlas_root):
-        os.mkdir(atlas_root)
-    for i in range(0, len(image_list)):
-        print('img '+image_list[i])
-        image = tifffile.imread(os.path.join(image_root, image_list[i]))
-        atlas_mask = getMaskSinge(image)
+    atlas_root = os.path.join(image_root, '..', 'atlas')
+    os.makedirs(atlas_root, exist_ok=True)
+    for filename in _tiff_files(image_root):
+        atlas = getMaskSinge(_read_plane(os.path.join(image_root, filename)))
+        tifffile.imwrite(os.path.join(atlas_root, filename), atlas)
 
-        # print(atlas_mask)
-        tifffile.imwrite(os.path.join(atlas_root, image_list[i]),atlas_mask)
+
+def _atlas_edges(atlas):
+    """Preserve the legacy eight-neighbour rule, including the unchanged border."""
+    output = atlas.copy()
+    height, width = atlas.shape
+    if height < 3 or width < 3:
+        return output
+    reference = atlas[1:-1, :-2]
+    uniform = np.ones((height - 2, width - 2), dtype=bool)
+    for dr, dc in [(0, 1), (1, 0), (1, 1), (1, -1),
+                   (-1, 0), (-1, -1), (-1, 1)]:
+        uniform &= atlas[1 + dr:height - 1 + dr, 1 + dc:width - 1 + dc] == reference
+    output[1:-1, 1:-1][uniform] = 0
+    return output
+
+
+def genEdgefromAtlas(atlas_root, Edge_root):
+    os.makedirs(Edge_root, exist_ok=True)
+    for filename in _tiff_files(atlas_root):
+        atlas = _read_plane(os.path.join(atlas_root, filename))
+        tifffile.imwrite(os.path.join(Edge_root, filename), _atlas_edges(atlas))
+
+
+def genPoints(image_root, Points_root):
+    os.makedirs(Points_root, exist_ok=True)
+    for filename in _tiff_files(image_root):
+        image = _read_plane(os.path.join(image_root, filename))
+        points = (image == 1000).astype(np.uint16) * 255
+        tifffile.imwrite(os.path.join(Points_root, filename), points)
+
+
+def genSingleRegion(atlas_root, Region_root, Region_name, Mask_id):
+    files = _tiff_files(atlas_root)
+    shape = _read_plane(os.path.join(atlas_root, files[0])).shape
+    region = np.empty((len(files),) + shape, dtype=np.uint16)
+    labels = np.asarray(list(Mask_id))
+    # Keep only one atlas slice in memory; do not allocate an atlas volume or
+    # another full-size temporary volume for every label.
+    for index, filename in enumerate(files):
+        plane = _read_plane(os.path.join(atlas_root, filename), shape)
+        region[index] = np.isin(plane, labels).astype(np.uint16) * 255
+    os.makedirs(Region_root, exist_ok=True)
+    tifffile.imwrite(os.path.join(Region_root, 'Region_' + Region_name + '.tif'),
+                     region, photometric='minisblack')
+    print('finished')
+
+
+def genPointsSingleRegion(image_root, Region_root, Points_SingleRegion_root, Region_name):
+    files = _tiff_files(image_root)
+    region = tifffile.imread(os.path.join(Region_root, 'Region_' + Region_name + '.tif'))
+    if region.ndim == 2 and len(files) == 1:
+        region = region[np.newaxis, :, :]
+    if region.ndim != 3 or region.shape[0] != len(files):
+        raise ValueError('Region mask depth must match the number of input slices.')
+    points = np.empty(region.shape, dtype=np.uint16)
+    for index, filename in enumerate(files):
+        plane = _read_plane(os.path.join(image_root, filename), region.shape[1:])
+        points[index] = ((plane == 1000) & (region[index] > 0)).astype(np.uint16) * 255
+    os.makedirs(Points_SingleRegion_root, exist_ok=True)
+    tifffile.imwrite(os.path.join(Points_SingleRegion_root, 'Points_Region_' + Region_name + '.tif'),
+                     points, photometric='minisblack')
+    print('finished')
+
+
+def merge(root):
+    files = _tiff_files(root)
+    shape = _read_plane(os.path.join(root, files[0])).shape
+    total = np.zeros(shape, dtype=float)
+    for filename in files:
+        total += _read_plane(os.path.join(root, filename), shape)
+    total[total > 1] = 255
+    tifffile.imwrite(os.path.join(root, '..', 'merge_points.tif'), total.astype(np.uint8))
+
+
 
 def label_parse(lable_root):
     """
@@ -80,110 +163,6 @@ def label_parse(lable_root):
     print(name_index)
     return name_index
 
-def genEdgefromAtlas(atlas_root,Edge_root):
-    """
-    Generate brain atlas' edges from atlas greyscale image.
-    :param atlas_root:
-    :param Edge_root:
-    :return:
-    """
-    if not os.path.exists(Edge_root):
-        os.mkdir(Edge_root)
-    atlas_list = os.listdir(atlas_root)
-    for k in range(len(atlas_list)):
-        print(os.path.join(atlas_list[k]))
-        atlas = tifffile.imread(os.path.join(atlas_root,atlas_list[k]))
-        atlas_new = atlas.copy() #copy
-        neighbor_8 = [(0, -1), (0, 1), (1, 0), (1, 1), (1, -1), (-1, 0), (-1, -1), (-1, 1)]
-        # print(atlas.shape[0]-1, atlas.shape[1]-1)
-        for i in range(1, atlas.shape[0]-1):
-            for j in range(1, atlas.shape[1]-1):
-                bg = []
-                for neighbor in neighbor_8:
-                    bgs = atlas[i+neighbor[0]][j+neighbor[1]]
-                    # print(bgs,i+neighbor[0],j+neighbor[1])
-                    bg.append(bgs)
-                # print(i,j,bg,len(np.unique(bg)))
-                if len(np.unique(bg))==1:
-                    atlas_new[i][j] = 0
-        tifffile.imwrite(os.path.join(Edge_root,atlas_list[k]),atlas_new)
-
-def genPoints(image_root,Points_root):
-    """
-    Generate points from freessia export.
-    :param image_root:
-    :param Points_root:
-    :return:
-    """
-    if not os.path.exists(Points_root):
-        os.mkdir(Points_root)
-    image_list = os.listdir(image_root)
-    for i in range(len(image_list)):
-        print(os.path.join(image_root,image_list[i]))
-        image = tifffile.imread(os.path.join(image_root,image_list[i]))
-        image_new = np.where(image==1000, 255, 0)
-        tifffile.imwrite(os.path.join(Points_root,image_list[i]),image_new.astype('uint16'))
-
-def genSingleRegion(atlas_root, Region_root, Region_name, Mask_id):
-    """
-    Using label index, generate single brain region, like hippocampus, cortex, etc.
-    :param atlas_root:
-    :param Region_root:
-    :param Region_name:
-    :param Mask_id:
-    :return:
-    """
-    if not os.path.exists(Region_root):
-        os.mkdir(Region_root)
-    atlas_list = os.listdir(atlas_root)
-    atlas_list.sort()
-    shape = tifffile.imread(os.path.join(atlas_root, atlas_list[0])).shape
-    atlas_3d = np.zeros((len(atlas_list), shape[0], shape[1])).astype('uint16')
-    for i in range(len(atlas_list)):
-        atlas_3d[i,:,:] = tifffile.imread(os.path.join(atlas_root, atlas_list[i])).astype('uint16')
-
-    region_3d = np.zeros((len(atlas_list), shape[0], shape[1])).astype('uint16')
-    for i in range(len(Mask_id)):
-        tmp = np.where(atlas_3d==Mask_id[i],255,0).astype('uint16')
-        region_3d+=tmp
-    tifffile.imwrite(os.path.join(Region_root,'Region_' + Region_name + '.tif'), region_3d.astype('uint16'))
-    print('finished')
-
-def genPointsSingleRegion(image_root, Region_root, Points_SingleRegion_root, Region_name):
-    """
-    Generate points inside the region mask.
-    :param image_root:
-    :param Region_root:
-    :param Points_SingleRegion_root:
-    :param Region_name:
-    :return:
-    """
-    if not os.path.exists(Points_SingleRegion_root):
-        os.mkdir(Points_SingleRegion_root)
-    img_list = os.listdir(image_root)
-    img_list.sort()
-    shape = tifffile.imread(os.path.join(image_root, img_list[0])).shape
-    image_3d = np.zeros((len(img_list),shape[0], shape[1])).astype('uint16')
-    for i in range(len(img_list)):
-        image_3d[i,:,:] = tifffile.imread(os.path.join(image_root, img_list[i])).astype('uint16')
-
-    Region_3d = tifffile.imread(os.path.join(Region_root,'Region_' + Region_name + '.tif'))
-    Points_3d = np.where(image_3d == 1000,1,0)&Region_3d
-    Points_3d = segmentation_quick_view(Points_3d)
-
-    tifffile.imwrite(os.path.join(Points_SingleRegion_root,'Points_Region_' + Region_name + '.tif'),Points_3d.astype('uint16'))
-
-    print('finished')
-
-def merge(root):
-    im_lst = os.listdir(root)
-    shape = tifffile.imread(os.path.join(root,im_lst[0])).shape
-    image = np.zeros((shape[0],shape[1]))
-    for i in range(len(im_lst)):
-        tmp = tifffile.imread(os.path.join(root,im_lst[i]))
-        image += tmp
-    image[image>1] = 255
-    tifffile.imwrite(os.path.join(root, '..','merge_points.tif'),image.astype('uint8'))
 
 def genMergeRaw(Edge_root, Points_root, Save_root, Snapshot_id):
     if not os.path.exists(Save_root):
@@ -208,7 +187,9 @@ def genMergeRaw(Edge_root, Points_root, Save_root, Snapshot_id):
         raw = tifffile.imread(os.path.join(Edge_root,Edge_name))
         tifffile.imwrite(os.path.join(dir,Edge_name),raw.astype('uint8'))
 
+
 if __name__ == "__main__":
+    from Parameter import *
     # freesia export cell counts
     image_root = os.path.join(freesia_export_path, 'images')
     regenAtlas(image_root)

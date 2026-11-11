@@ -560,4 +560,4 @@ if __name__ == "__main__":
     exp_name = Stats['Exp_data_list'] 
     obser_name = Stats['Observe_data_list'] 
     con_name = Stats['Ctrl_data_list']
-    lc.log2change(root, exp_name, obser_name, con_name) 
+    lc.log2change(root, exp_name, obser_name)

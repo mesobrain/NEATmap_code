@@ -1,11 +1,25 @@
-from Environment import *
-from Parameter import *
+"""Summarize cell counts with the original 43-region atlas index mapping."""
+
+import csv
+import os
+
+import numpy as np
+import pandas as pd
 
 def cortex_stats(csv_path):
     
-    file = open(os.path.join(csv_path, 'cell-counting.csv'))
-    df = pd.read_csv(file, error_bad_lines=False)
-    counts = df['count']
+    # Reading the path lets pandas close the input file. Malformed CSV rows must
+    # fail rather than silently shift the fixed atlas row indices below.
+    df = pd.read_csv(os.path.join(csv_path, 'cell-counting.csv'))
+    if 'count' not in df.columns:
+        raise ValueError("cell-counting.csv must contain a 'count' column")
+    if len(df) < 596:
+        raise ValueError('cell-counting.csv must contain at least 596 atlas rows')
+    if pd.api.types.is_bool_dtype(df['count'].dtype):
+        raise ValueError("The 'count' column must contain numeric cell counts")
+    counts = pd.to_numeric(df['count'], errors='raise')
+    if not np.isfinite(counts.to_numpy()).all() or (counts < 0).any():
+        raise ValueError("The 'count' column must contain finite, non-negative values")
     ## FRP
     frp_index = np.arange(12, 22)
     frp = counts[frp_index].values
@@ -404,16 +418,20 @@ def cortex_stats(csv_path):
     region_counts = dict(zip(region_name, counts_list))
     csv_root = os.path.join(csv_path, '..')
     write_csv_path = os.path.join(csv_root, 'cortex_cells_counts.csv')
-    firts_line = ['Region', 'layer 1', 'layer 2/3', 'layer 4', 'layer 5', 'layer 6','SUM']
-    with open(write_csv_path, 'w+', newline='') as f:
+    first_line = ['Region', 'layer 1', 'layer 2/3', 'layer 4', 'layer 5', 'layer 6','SUM']
+    with open(write_csv_path, 'w', newline='', encoding='utf-8') as f:
         csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(firts_line)
-        for i in range(len(region_name)):
-            write_line = [region_name[i], region_counts[region_name[i]][0], region_counts[region_name[i]][1], region_counts[region_name[i]][2], region_counts[region_name[i]][3],
-                            region_counts[region_name[i]][4], sum(region_counts[region_name[i]])]
-            csv_write.writerow(write_line)
+        csv_write.writerow(first_line)
+        for region in region_name:
+            values = region_counts[region]
+            csv_write.writerow([region] + values + [sum(values)])
 
 if __name__ == "__main__":
+    if __package__ and '.' in __package__:
+        from ..Parameter import Data_root, Stats
+    else:
+        from Parameter import Data_root, Stats
+
     root = Data_root
     data_name = Stats['group_data_name']
     for k in range(len(data_name)):

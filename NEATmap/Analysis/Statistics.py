@@ -1,490 +1,275 @@
-from Environment import *
-from Parameter import *
+"""CSV-based regional statistics, independent of the neural-network runtime."""
+import csv
+import os
+
+import numpy as np
+import pandas as pd
+import scipy.stats as ss
+
+try:
+    from ..Parameter import Data_root, Stats
+except ImportError:
+    from Parameter import Data_root, Stats
+
+
+def _save_frame(frame, path):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    frame.to_csv(path, index=False)
+
+
+def _confidence(p, symbols=None):
+    symbols = symbols or ['***', '**', '*', 'ns']
+    if not np.isfinite(p):
+        return 'NA'
+    for threshold, symbol in zip([0.001, 0.01, 0.05], symbols):
+        if p < threshold:
+            return symbol
+    return symbols[3]
+
+
+def _read_group(root, names, filename, region_column, columns,
+                region_num, regions=None):
+    if not names:
+        raise ValueError('Each comparison group must contain at least one sample.')
+    arrays = []
+    for name in names:
+        path = os.path.join(root, name, 'whole_brain_cell_counts', filename)
+        frame = pd.read_csv(path)
+        needed = [region_column] + list(columns)
+        missing = [column for column in needed if column not in frame]
+        if missing:
+            raise ValueError('{} is missing columns: {}'.format(path, missing))
+        labels = frame[region_column]
+        if labels.isnull().any() or labels.duplicated().any():
+            raise ValueError('{} contains missing or duplicate region labels.'.format(path))
+        if regions is None:
+            regions = list(labels)
+            if region_num is not None and len(regions) != region_num:
+                raise ValueError('Expected {} regions, found {} in {}.'.format(region_num, len(regions), path))
+        if set(labels) != set(regions):
+            raise ValueError('Region labels do not match the reference sample: {}'.format(path))
+        values = frame.set_index(region_column).loc[regions, columns].values.astype(float)
+        arrays.append(values)
+    return regions, np.stack(arrays, axis=1)
+
+
+def _comparison(root, fs_name, ctrl_name, filename, region_column,
+                columns, region_num):
+    regions, experiment = _read_group(root, fs_name, filename, region_column,
+                                      columns, region_num)
+    _, control = _read_group(root, ctrl_name, filename, region_column,
+                            columns, region_num, regions)
+    return regions, experiment, control
+
 
 def DNN_result_ranksum(data_path, model_name):
+    # Read each model only once, while retaining the original ordered comparisons.
+    scores = {name: pd.read_csv(os.path.join(data_path, str(name) + '_patch_results.csv'))['Dice'].values
+              for name in model_name}
+    with open(os.path.join(data_path, 'Dice_ranksums.txt'), 'w') as output:
+        for first in model_name:
+            for second in model_name:
+                if first != second:
+                    _, p = ss.ranksums(scores[first], scores[second])
+                    # Retain the historical model-comparison marker convention.
+                    if not np.isfinite(p):
+                        marker = 'NA'
+                    elif p <= 0.0001:
+                        marker = '***'
+                    elif p < 0.05:
+                        marker = '**'
+                    else:
+                        marker = '*'
+                    output.write('{} | {},{}\n'.format(marker, first, second))
 
-    file = open(os.path.join(data_path, 'Dice_ranksums.txt'), 'w+')
-    symbol = ['***', '**', '*']
-    for i in model_name:
-        for j in model_name:
-            if i == j:
-                pass
-            else:
-                f1 = open(os.path.join(data_path, str(i) + '_patch_results.csv'))
-                f2 = open(os.path.join(data_path, str(j) + '_patch_results.csv'))
-                df1 = pd.read_csv(f1)
-                df2 = pd.read_csv(f2)
-                stat, p = ss.ranksums(df1['Dice'], df2['Dice'])
-                if p <=0.0001:
-                    file.writelines(str(symbol[0]) + ' | ')
-                    file.writelines(str(i) + ',' + str(j) + '\n')
-                if 0.0001 < p < 0.05:
-                    file.writelines(str(symbol[1]) + ' | ')
-                    file.writelines(str(i) + ',' + str(j) + '\n')
-                if p >= 0.05:
-                    file.writelines(str(symbol[2]) + ' | ')
-                    file.writelines(str(i) + ',' + str(j) + '\n')
-    file.close()
 
 def select_level(csv_path, save_path, level=6):
+    frame = pd.read_csv(csv_path)
+    columns = ['id', 'acronym', 'count', 'density', 'volume', 'path', 'level', 'name']
+    selected = frame.loc[frame['level'] == level, columns]
+    _save_frame(selected, os.path.join(save_path, 'cell-counts-level{}.csv'.format(level)))
 
-    file = open(csv_path)
-    df = pd.read_csv(file, error_bad_lines=False)
-    select_df = df[df['level'] == level]
-    save_name = 'cell-counts-level6.csv'
-    savepath = os.path.join(save_path, save_name)
-    savecsv = pd.DataFrame(columns=['id', 'acronym', 'count', 'density', 'volume', 'path', 'level', 'name'])
-    savecsv['id'] = select_df['id']
-    savecsv['acronym'] = select_df['acronym']
-    savecsv['count'] = select_df['count']
-    savecsv['density'] = select_df['density']
-    savecsv['volume'] = select_df['volume']
-    savecsv['path'] = select_df['path']
-    savecsv['level'] = select_df['level']
-    savecsv['name'] = select_df['name']
-    savecsv.to_csv(savepath, index=False)
 
 def norm_data(data):
-    data1 = data - np.min(data) 
-    data = data1 * 1.0 / (np.max(data) - np.min(data) )
+    values = np.asarray(data, dtype=float)
+    if values.size == 0:
+        return values.copy()
+    minimum, maximum = np.min(values), np.max(values)
+    if maximum == minimum:
+        return np.zeros_like(values)
+    return (values - minimum) / (maximum - minimum)
 
-    return data
+
+def _read_level6_counts(csv_path):
+    frame = pd.read_csv(csv_path)
+    if frame['acronym'].isnull().any():
+        raise ValueError('Region acronyms must not be missing.')
+    frame['count'] = pd.to_numeric(frame['count'], errors='raise')
+    values = frame['count'].values
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError('Cell counts must be finite and nonnegative.')
+    return frame
+
+
 def level6_sum(csv_path, save_path):
+    frame = _read_level6_counts(csv_path)
+    counts = frame.groupby('acronym', sort=False)['count'].sum()
+    result = pd.DataFrame({'Region': counts.index, 'counts': counts.values}, columns=['Region', 'counts'])
+    _save_frame(result, os.path.join(save_path, 'cell-counts-level6-sum.csv'))
 
-    file = open(csv_path)
-    df = pd.read_csv(file, error_bad_lines=False)
-    region_name = df['acronym'].values
-    region_name = list(region_name)
-    region_name = sorted(set(region_name), key=region_name.index)
-    counts = df['count'].values
-    sum_counts = []
-    index = 0
-    for i in range(len(counts)):
-        values = counts[index : index + 2]
-        index = 2*(i+1)
-        if i < len(counts) // 2:
-            sum_counts.append(sum(values))
-        else:
-            break
-    
-    # sum_counts = norm_data(sum_counts)
-    # sum_counts = [k / 1078 for k in sum_counts]
-    savename = 'cell-counts-level6-sum.csv'
-    savepath = os.path.join(save_path, savename)
-    savecsv = pd.DataFrame(columns=['Region', 'counts'])
-    savecsv['Region'] = region_name
-    savecsv['counts'] = sum_counts
-    savecsv.to_csv(savepath, index=False)
 
 def level6_left_right_brain(csv_path, save_path):
+    frame = _read_level6_counts(csv_path)
+    rows = []
+    for region, group in frame.groupby('acronym', sort=False):
+        if len(group) != 2:
+            raise ValueError('Expected two hemisphere rows for region {}.'.format(region))
+        values = group['count'].values
+        rows.append([region, values[0], values[1]])
+    _save_frame(pd.DataFrame(rows, columns=['Region', 'left_counts', 'right_counts']),
+                os.path.join(save_path, 'cell-counts-level6-left_right.csv'))
 
-    file = open(csv_path)
-    df = pd.read_csv(file, error_bad_lines=False)
-    region_name = df['acronym'].values
-    region_name = list(region_name)
-    region_name = sorted(set(region_name), key=region_name.index)
-    counts = df['count'].values
-    left_counts = []
-    right_counts = []
-    index = 0
-    for i in range(len(counts)):
-        values = counts[index : index + 2]
-        index = 2*(i+1)
-        if i < len(counts) // 2:
-            left_count = values[0]
-            right_count = values[1]
-            left_counts.append(left_count)
-            right_counts.append(right_count)
-        else:
-            break
-    savename = 'cell-counts-level6-left_right.csv'
-    savepath = os.path.join(save_path, savename)
-    savecsv = pd.DataFrame(columns=['Region', 'left_counts', 'right_counts'])
-    savecsv['Region'] = region_name
-    savecsv['left_counts'] = left_counts
-    savecsv['right_counts'] = right_counts
-    savecsv.to_csv(savepath, index=False)
 
-def correct_p_values(pvalues, method = 'BH'):
-  """Corrects p-values for multiple testing using various methods. 
-  
-  Arguments
-  ---------
-  pvalues : array
-    List of p values to be corrected.
-  method : str 
-    Optional method to use: 'BH' = 'FDR' = 'Benjamini-Hochberg', 
-    'B' = 'FWER' = 'Bonferoni'.
-  
-  Returns
-  -------
-  qvalues : array
-    Corrected p values.
-  
-  References
-  ----------
-  - `Benjamini Hochberg, 1995 <http://www.jstor.org/stable/2346101?seq=1#page_scan_tab_contents>`_
-  - `Bonferoni correction <http://www.tandfonline.com/doi/abs/10.1080/01621459.1961.10482090#.VmHWUHbH6KE>`_
-  - `R statistics package <https://www.r-project.org/>`_
-  
-  Notes
-  -----
-  Modified from http://statsmodels.sourceforge.net/ipdirective/generated/scikits.statsmodels.sandbox.stats.multicomp.multipletests.html.
-  """
-  
-  pvals = np.asarray(pvalues);
+def correct_p_values(pvalues, method='BH'):
+    """BH/FDR or Bonferroni adjustment; missing tests remain NaN.
 
-  if method.lower() in ['bh', 'fdr']:
-    pvals_sorted_ids = np.argsort(pvals);
-    pvals_sorted = pvals[pvals_sorted_ids]
-    sorted_ids_inv = pvals_sorted_ids.argsort()
+    Finite tests form the correction family. Callers that treat missing tests
+    conservatively can replace them with 1 before calling this function.
+    """
+    values = np.asarray(pvalues, dtype=float)
+    if values.ndim != 1:
+        raise ValueError('pvalues must be one-dimensional.')
+    key = method.lower()
+    if key not in ('bh', 'fdr', 'b', 'fwer'):
+        raise ValueError('Unknown multiple-testing method: {}'.format(method))
+    finite = np.isfinite(values)
+    if np.any((values[finite] < 0) | (values[finite] > 1)):
+        raise ValueError('Finite p-values must lie between 0 and 1.')
+    result = np.full(values.shape, np.nan)
+    valid = values[finite]
+    n = valid.size
+    if not n:
+        return result
+    if key in ('b', 'fwer'):
+        result[finite] = np.minimum(valid * n, 1.0)
+    else:
+        order = np.argsort(valid)
+        adjusted = valid[order] * n / np.arange(1, n + 1, dtype=float)
+        adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+        corrected = np.empty(n, dtype=float)
+        corrected[order] = np.minimum(adjusted, 1.0)
+        result[finite] = corrected
+    return result
 
-    n = len(pvals);
-    bhfactor = np.arange(1,n+1)/float(n);
-
-    pvals_corrected_raw = pvals_sorted / bhfactor;
-    pvals_corrected = np.minimum.accumulate(pvals_corrected_raw[::-1])[::-1]
-    pvals_corrected[pvals_corrected>1] = 1;
-
-    return pvals_corrected[sorted_ids_inv];
-  
-  elif method.lower() in ['b', 'fwer']:
-    n = len(pvals);        
-    
-    pvals_corrected = n * pvals;
-    pvals_corrected[pvals_corrected>1] = 1;
-    
-    return pvals_corrected;
 
 def ttest_level6(root, fs_name, ctrl_name, region_num=205):
-    fs_array = np.zeros((region_num, len(fs_name))).astype('int')
-    ctrl_array = np.zeros((region_num, len(ctrl_name))).astype('int')
-    for i in range(len(fs_name)):
-        fs_csv_path = os.path.join(root, fs_name[i], 'whole_brain_cell_counts/cell-counts-level6-sum.csv')
-        ctrl_csv_path = os.path.join(root, ctrl_name[i], 'whole_brain_cell_counts/cell-counts-level6-sum.csv')
-        fs_file, ctrl_file = open(fs_csv_path), open(ctrl_csv_path)
-        fs_df, ctrl_df = pd.read_csv(fs_file), pd.read_csv(ctrl_file)
-        fs_count, ctrl_count = fs_df['counts'].values, ctrl_df['counts'].values
-        region_name = fs_df['Region'].values
-        fs_array[:, i] = fs_count
-        ctrl_array[:, i] = ctrl_count
-    pval_list = []
-    for rn in range(region_num):
-        tvals, pvals = ss.ttest_ind(fs_array[rn, :], ctrl_array[rn, :], axis=0, equal_var=True)
-        pval_list.append(pvals)
-    pvals_corrected = correct_p_values(pval_list, method='FDR')
-    csv_name = os.path.join(root, 'Hypothesis_test_level6.csv')
-    first_line = ['Region', 'p_val', 'Confidence level']
-    significant_num = 0
-    symbol = Stats['symbol']
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for pc in range(len(pvals_corrected)):
-            if pvals_corrected[pc] < 0.001:
-                write_lines = [region_name[pc], pvals_corrected[pc], str(symbol[0])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.001 < pvals_corrected[pc] < 0.01:
-                write_lines = [region_name[pc], pvals_corrected[pc], str(symbol[1])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.01 < pvals_corrected[pc] < 0.05:
-                write_lines = [region_name[pc], pvals_corrected[pc], str(symbol[2])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if pvals_corrected[pc] >= 0.05:
-                write_lines = [region_name[pc], pvals_corrected[pc], str(symbol[3])]
-                csv_write.writerow(write_lines)
+    regions, experiment, control = _comparison(root, fs_name, ctrl_name,
+        'cell-counts-level6-sum.csv', 'Region', ['counts'], region_num)
+    pvalues = ss.ttest_ind(experiment[:, :, 0], control[:, :, 0], axis=1, equal_var=True)[1]
+    adjusted = correct_p_values(pvalues, method='FDR')
+    symbols = Stats.get('symbol', ['***', '**', '*', 'ns'])
+    result = pd.DataFrame({'Region': regions, 'p_val': adjusted,
+        'Confidence level': [_confidence(p, symbols) for p in adjusted]},
+        columns=['Region', 'p_val', 'Confidence level'])
+    _save_frame(result, os.path.join(root, 'Hypothesis_test_level6.csv'))
+    print('{} brain regions showed significant differences'.format(np.count_nonzero(adjusted < 0.05)))
 
-    print('{} brain regions showed significant differences'.format(significant_num))
 
 def ttest_level6_left_right(root, fs_name, ctrl_name, region_num=205):
-    fs_left_array = np.zeros((region_num, len(fs_name))).astype('int')
-    ctrl_left_array = np.zeros((region_num, len(ctrl_name))).astype('int')
-    fs_right_array = np.zeros((region_num, len(fs_name))).astype('int')
-    ctrl_right_array = np.zeros((region_num, len(ctrl_name))).astype('int')
-    for i in range(len(fs_name)):
-        fs_csv_path = os.path.join(root, fs_name[i], 'whole_brain_cell_counts/cell-counts-level6-left_right.csv')
-        ctrl_csv_path = os.path.join(root, ctrl_name[i], 'whole_brain_cell_counts/cell-counts-level6-left_right.csv')
-        fs_file, ctrl_file = open(fs_csv_path), open(ctrl_csv_path)
-        fs_df, ctrl_df = pd.read_csv(fs_file), pd.read_csv(ctrl_file)
-        fs_left_count, ctrl_left_count = fs_df['left_counts'].values, ctrl_df['left_counts'].values
-        fs_right_count, ctrl_right_count = fs_df['right_counts'].values, ctrl_df['right_counts'].values
-        region_name = fs_df['Region'].values
-        fs_left_array[:, i] = fs_left_count
-        ctrl_left_array[:, i] = ctrl_left_count
-        fs_right_array[:, i] = fs_right_count
-        ctrl_right_array[:, i] = ctrl_right_count
-    
-    fs_left_mean = np.mean(fs_left_array, 1)
-    fs_right_mean = np.mean(fs_right_array, 1)
-    ctrl_left_mean = np.mean(ctrl_left_array, 1)
-    ctrl_right_mean = np.mean(ctrl_right_array, 1)
-    left_pval_list = []
-    right_pval_list = []
-    for rn in range(region_num):
-        left_tvals, left_pvals = ss.ttest_ind(fs_left_array[rn, :], ctrl_left_array[rn, :], axis=0, equal_var=True)
-        left_pval_list.append(left_pvals)
-        right_tvals, right_pvals = ss.ttest_ind(fs_right_array[rn, :], ctrl_right_array[rn, :], axis=0, equal_var=True)
-        right_pval_list.append(right_pvals)
-    left_pvals_corrected = correct_p_values(left_pval_list, method='FDR')
-    right_pvals_corrected = correct_p_values(right_pval_list, method='FDR')
-    csv_name = os.path.join(root, 'Hypothesis_test_level6_left_right.csv')
+    regions, experiment, control = _comparison(root, fs_name, ctrl_name,
+        'cell-counts-level6-left_right.csv', 'Region', ['left_counts', 'right_counts'], region_num)
+    pvalues = ss.ttest_ind(experiment, control, axis=1, equal_var=True)[1]
+    adjusted = np.column_stack([correct_p_values(pvalues[:, i], 'FDR') for i in range(2)])
+    result = pd.DataFrame({'Region': regions,
+        'fs_right_mean': experiment[:, :, 1].mean(axis=1),
+        'fs_left_mean': experiment[:, :, 0].mean(axis=1),
+        'ctrl_right_mean': control[:, :, 1].mean(axis=1),
+        'ctrl_left_mean': control[:, :, 0].mean(axis=1),
+        'right_Confidence level': adjusted[:, 1], 'left_Confidence level': adjusted[:, 0]},
+        columns=['Region', 'fs_right_mean', 'fs_left_mean', 'ctrl_right_mean',
+                 'ctrl_left_mean', 'right_Confidence level', 'left_Confidence level'])
+    _save_frame(result, os.path.join(root, 'Hypothesis_test_level6_left_right.csv'))
 
-    first_line = ['Region', 'fs_right_mean', 'fs_left_mean', 'ctrl_right_mean', 'ctrl_left_mean', 'right_Confidence level',
-                 'left_Confidence level']
-
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for pc in range(len(left_pvals_corrected)):
-            
-            write_lines = [region_name[pc], fs_right_mean[pc], fs_left_mean[pc], ctrl_right_mean[pc], ctrl_left_mean[pc],
-                            right_pvals_corrected[pc], left_pvals_corrected[pc]]
-            csv_write.writerow(write_lines)
-
-    print('Finished')
 
 def symbol_left_right_ci(csv_path, save_csv, select_left=True):
-    file = open(os.path.join(csv_path, 'Hypothesis_test_level6_left_right.csv'))
-    df = pd.read_csv(file)
-    region_name = df['Region'].values
-    if select_left:
-        left_p_correct = df['left_Confidence level'].values
-        pvals_corrected = list(left_p_correct)
-        first_line = ['Region', 'Left Confidence level']
-        csv_name = os.path.join(save_csv, 'Symbol_level6_left.csv')
-    else:
-        right_p_correct = df['right_Confidence level'].values
-        pvals_corrected = list(right_p_correct)
-        first_line = ['Region', 'Right Confidence level']
-        csv_name = os.path.join(save_csv, 'Symbol_level6_right.csv')
-    symbol = ['***', '**', '*', 'ns'] # ***:p<0.001, **:p<0.01, *:p<0.05, ns(no significant): p>=0.05
-    significant_num = 0
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for pc in range(len(pvals_corrected)):
-            if pvals_corrected[pc] < 0.001:
-                write_lines = [region_name[pc], str(symbol[0])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.001 < pvals_corrected[pc] < 0.01:
-                write_lines = [region_name[pc], str(symbol[1])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.01 < pvals_corrected[pc] < 0.05:
-                write_lines = [region_name[pc], str(symbol[2])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if pvals_corrected[pc] >= 0.05:
-                write_lines = [region_name[pc], str(symbol[3])]
-                csv_write.writerow(write_lines)
+    frame = pd.read_csv(os.path.join(csv_path, 'Hypothesis_test_level6_left_right.csv'))
+    side = 'left' if select_left else 'right'
+    result = pd.DataFrame({'Region': frame['Region'],
+        side.title() + ' Confidence level': [_confidence(p) for p in frame[side + '_Confidence level']]},
+        columns=['Region', side.title() + ' Confidence level'])
+    _save_frame(result, os.path.join(save_csv, 'Symbol_level6_' + side + '.csv'))
 
-    print('{} brain regions showed significant differences'.format(significant_num))
 
 def ttest_multi_region_vol(root, fs_name, ctrl_name, region_num=43):
+    regions, experiment, control = _comparison(root, fs_name, ctrl_name,
+        'cortex_volume.csv', 'Region_name', ['Volume ratio %'], region_num)
+    pvalues = ss.ttest_ind(experiment[:, :, 0], control[:, :, 0], axis=1, equal_var=True)[1]
+    adjusted = correct_p_values(pvalues, 'FDR')
+    result = pd.DataFrame({'Region': regions, 'Confidence level': [_confidence(p) for p in adjusted]},
+                          columns=['Region', 'Confidence level'])
+    _save_frame(result, os.path.join(root, 'Hypothesis_test_cortex_volume.csv'))
+    print('{} brain regions showed significant differences'.format(np.count_nonzero(adjusted < 0.05)))
 
-    fs_array = np.zeros((region_num, len(fs_name))).astype('int')
-    ctrl_array = np.zeros((region_num, len(ctrl_name))).astype('int')
-    for i in range(len(fs_name)):
-        fs_csv_path = os.path.join(root, fs_name[i], 'whole_brain_cell_counts/cortex_volume.csv')
-        ctrl_csv_path = os.path.join(root, ctrl_name[i], 'whole_brain_cell_counts/cortex_volume.csv')
-        fs_file, ctrl_file = open(fs_csv_path), open(ctrl_csv_path)
-        fs_df, ctrl_df = pd.read_csv(fs_file), pd.read_csv(ctrl_file)
-        fs_count, ctrl_count = fs_df['Volume ratio %'].values, ctrl_df['Volume ratio %'].values
-        region_name = fs_df['Region_name'].values
-        fs_array[:, i] = fs_count
-        ctrl_array[:, i] = ctrl_count
-    pval_list = []
-    for rn in range(region_num):
-        tvals, pvals = ss.ttest_ind(fs_array[rn, :], ctrl_array[rn, :], axis=0, equal_var=True)
-        pval_list.append(pvals)
-    pvals_corrected = correct_p_values(pval_list, method='FDR')
-    csv_name = os.path.join(root, 'Hypothesis_test_cortex_volume.csv')
-    symbol = ['***', '**', '*', 'ns'] # ***:p<0.001, **:p<0.01, *:p<0.05, ns(no significant): p>=0.05
-    first_line = ['Region', 'Confidence level']
-    significant_num = 0
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for pc in range(len(pvals_corrected)):
-            if pvals_corrected[pc] < 0.001:
-                write_lines = [region_name[pc], str(symbol[0])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.001 < pvals_corrected[pc] < 0.01:
-                write_lines = [region_name[pc], str(symbol[1])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if 0.01 < pvals_corrected[pc] < 0.05:
-                write_lines = [region_name[pc], str(symbol[2])]
-                csv_write.writerow(write_lines)
-                significant_num += 1
-            if pvals_corrected[pc] >= 0.05:
-                write_lines = [region_name[pc], str(symbol[3])]
-                csv_write.writerow(write_lines)
-
-    print('{} brain regions showed significant differences'.format(significant_num))
 
 def get_multi_cl_counts(root, data_name, save_path, symbol, pvals_cutoff):
+    if len(symbol) != len(pvals_cutoff):
+        raise ValueError('Each significance symbol must have a matching cutoff.')
+    frame = pd.read_csv(os.path.join(root, data_name, 'whole_brain_cell_counts', 'cell-counts-level6-sum.csv'))
+    confidence = pd.read_csv(os.path.join(root, 'Hypothesis_test_level6.csv'))
+    for label, cutoff in zip(symbol, pvals_cutoff):
+        regions = confidence.loc[confidence['Confidence level'] == label, 'Region']
+        result = frame.loc[frame['Region'].isin(regions), ['Region', 'counts']]
+        _save_frame(result, os.path.join(save_path, 'Region_{}.csv'.format(cutoff)))
 
-    file = open(os.path.join(root, data_name, 'whole_brain_cell_counts/cell-counts-level6-sum.csv'))
-    cl_file = open(os.path.join(root, 'Hypothesis_test_level6.csv'))
-    df = pd.read_csv(file)
-    cl_df = pd.read_csv(cl_file)
-    for s in range(len(symbol)):
-        select_cl_df = cl_df[cl_df['Confidence level'] == symbol[s]]
-        select_region = select_cl_df['Region'].values
-        Region = df['Region'].values
-        counts = df['counts'].values
-        select_region_list = []
-        select_counts_list = []
-
-        for i in range(len(Region)):
-
-            if Region[i] in select_region:
-                select_region_list.append(Region[i])
-                select_counts_list.append(counts[i])
-            else:
-                pass
-        csv_name = os.path.join(save_path, 'Region_' + str(pvals_cutoff[s]) + '.csv')
-        savecsv = pd.DataFrame(columns=['Region', 'counts'])
-        savecsv['Region'] = select_region_list
-        savecsv['counts'] = select_counts_list
-        savecsv.to_csv(csv_name, index=False)
 
 def get_plot_region_counts(root, data_name, plot_region_name, save_path, pvals_cutoff):
-
-    csv_name = os.path.join(save_path, 'plot_region.csv')
-    lines = ['Region', 'counts']
-    with open(csv_name, 'w+', newline='') as f:
-        csv_writer = csv.writer(f, dialect='excel')
-        for num in range(len(pvals_cutoff)):
-            file = open(os.path.join(root, data_name, 'whole_brain_cell_counts/csv', 'Region_' + pvals_cutoff[num] + '.csv'))
-            df = pd.read_csv(file)
-            region_name = df['Region'].values
-            counts = df['counts'].values
-            csv_writer.writerow(pvals_cutoff[num])
-            csv_writer.writerow(lines)
-            for rn in range(len(region_name)):
-                if region_name[rn] in plot_region_name:              
-                    write_lines = [region_name[rn], counts[rn]]
-                    csv_writer.writerow(write_lines)
+    os.makedirs(save_path, exist_ok=True)
+    with open(os.path.join(save_path, 'plot_region.csv'), 'w', newline='') as output:
+        writer = csv.writer(output)
+        for cutoff in pvals_cutoff:
+            frame = pd.read_csv(os.path.join(root, data_name, 'whole_brain_cell_counts', 'csv', 'Region_{}.csv'.format(cutoff)))
+            writer.writerow([cutoff])
+            writer.writerow(['Region', 'counts'])
+            selected = frame.loc[frame['Region'].isin(plot_region_name), ['Region', 'counts']]
+            writer.writerows(selected.values)
 
 
-def ttest_multi_layer(root, fs_name, ctrl_name, layer_name, save_layer_name, stats_dtype, region_num=43, remove_nan=True):
+def ttest_multi_layer(root, fs_name, ctrl_name, layer_name, save_layer_name,
+                     stats_dtype, region_num=43, remove_nan=True):
+    regions, experiment, control = _comparison(root, fs_name, ctrl_name,
+        stats_dtype + '.csv', 'Region_name', [layer_name], region_num)
+    pvalues = ss.ttest_ind(experiment[:, :, 0], control[:, :, 0], axis=1, equal_var=True)[1]
+    if remove_nan:
+        pvalues = np.where(np.isfinite(pvalues), pvalues, 1.0)
+    adjusted = correct_p_values(pvalues, 'FDR')
+    _save_frame(pd.DataFrame({'Region': regions, 'P value': adjusted}, columns=['Region', 'P value']),
+        os.path.join(root, 'stats_layer', save_layer_name + stats_dtype + '_p_values.csv'))
 
-    fs_array = np.zeros((region_num, len(fs_name))).astype('int')
-    ctrl_array = np.zeros((region_num, len(ctrl_name))).astype('int')
-    for i in range(len(fs_name)):
-        fs_csv_path = os.path.join(root, fs_name[i], 'whole_brain_cell_counts', stats_dtype + '.csv')
-        ctrl_csv_path = os.path.join(root, ctrl_name[i], 'whole_brain_cell_counts', stats_dtype + '.csv')
-        fs_file, ctrl_file = open(fs_csv_path), open(ctrl_csv_path)
-        fs_df, ctrl_df = pd.read_csv(fs_file), pd.read_csv(ctrl_file)
-        fs_count, ctrl_count = fs_df[layer_name].values, ctrl_df[layer_name].values
-        region_name = fs_df['Region_name'].values
-        fs_array[:, i] = fs_count
-        ctrl_array[:, i] = ctrl_count
-    pval_list = []
-    for rn in range(region_num):
-        tvals, pvals = ss.ttest_ind(fs_array[rn, :], ctrl_array[rn, :], axis=0, equal_var=True)
-        pval_list.append(pvals)
-
-    if remove_nan: 
-        pval_list_rn = [1.0 if math.isnan(p) else p for p in pval_list]
-
-    pvals_corrected = correct_p_values(pval_list_rn, method='FDR')
-    csv_name = os.path.join(root, 'stats_layer', save_layer_name + stats_dtype + '_p_values.csv')
-    first_line = ['Region', 'P value']
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for pc in range(len(pvals_corrected)):
-            write_lines = [region_name[pc], pvals_corrected[pc]]
-            csv_write.writerow(write_lines)
 
 def get_layer_ci(root, layer_name, save_layer_name, save_csv):
-    class_index = [0.001, 0.01, 0.05, 0.1]
-    symbol_list = []
-    file = open(os.path.join(root, 'layer_p_value.csv'))
-    df = pd.read_csv(file)
-    p_val = df[layer_name].values
-    region_name = df['Region'].values
-    p_val_list = list(p_val)
-    for p in p_val_list:
-        if p < 0.001:
-            symbol_list.append(class_index[0])
-        if 0.001 < p < 0.01:
-            symbol_list.append(class_index[1])
-        if 0.01 < p < 0.05:
-            symbol_list.append(class_index[2])
-        if p >= 0.05:
-            symbol_list.append(class_index[3])
-    csv_name = os.path.join(save_csv, save_layer_name + 'class' + '.csv')
-    savecsv = pd.DataFrame(columns=['Region', 'class'])
-    savecsv['Region'] = region_name
-    savecsv['class'] = symbol_list
-    savecsv.to_csv(csv_name, index=False)
+    frame = pd.read_csv(os.path.join(root, 'layer_p_value.csv'))
+    classes = {'***': 0.001, '**': 0.01, '*': 0.05, 'ns': 0.1, 'NA': np.nan}
+    result = pd.DataFrame({'Region': frame['Region'],
+        'class': [classes[_confidence(p)] for p in frame[layer_name]]}, columns=['Region', 'class'])
+    _save_frame(result, os.path.join(save_csv, save_layer_name + 'class.csv'))
+
 
 def level2_count(csv_path, save_csv):
-    file = open(os.path.join(csv_path, 'level6_total_cell_count.csv'))
-    df = pd.read_csv(file)
-    Ctrl = {}
-    Fst = {}
-    Sds = {}
-    for name in Stats['con_data_name']:
-        Ctrl[name] = df[name].values
-    for name in Stats['es_data_name']:
-        Fst[name] = df[name].values
-    for name in Stats['sds_data_name']:
-        Sds[name] = df[name].values
-    num = len(Stats['con_data_name'] + Stats['es_data_name'] + Stats['sds_data_name'])
-    total = np.zeros((205, num)).astype(int)
-    for i in range(len(Stats['con_data_name'])):
-        total[:, i] = Ctrl[Stats['con_data_name'][i]]
-    for j in range(len(Stats['es_data_name'])):
-        total[:, j + len(Stats['con_data_name'])] = Fst[Stats['es_data_name'][j]]
-    for k in range(len(Stats['sds_data_name'])):
-        total[:, k + len(Stats['con_data_name']) + len(Stats['es_data_name'])] = Sds[Stats['sds_data_name'][k]]
+    frame = pd.read_csv(os.path.join(csv_path, 'level6_total_cell_count.csv'))
+    samples = Stats['con_data_name'] + Stats['es_data_name'] + Stats['sds_data_name']
+    if len(frame) < 200:
+        raise ValueError('The configured level-2 atlas mapping requires at least 200 rows.')
+    values = frame.loc[:, samples].values.astype(float)
+    # Preserve the existing atlas row mapping; sample count is no longer fixed at 18.
+    boundaries = [0, 17, 27, 29, 36, 48, 56, 69, 108, 134, 160, 196, 200]
+    regions = ['Isocortex', 'OLF', 'HPF', 'CTXsp', 'STR', 'PAL', 'TH', 'HY', 'MB', 'P', 'MY', 'CBX']
+    totals = np.vstack([values[start:end].sum(axis=0) for start, end in zip(boundaries[:-1], boundaries[1:])])
+    result = pd.DataFrame(totals, columns=samples)
+    result.insert(0, 'Region', regions)
+    _save_frame(result, os.path.join(save_csv, 'level2_total_count.csv'))
 
-    Isocortex = np.sum(total[0:17, :], axis=0)
-    Olf = np.sum(total[17:27, :], axis=0)
-    Hpf = np.sum(total[27:29, :], axis=0)
-    Ctexsp = np.sum(total[29:36, :], axis=0)
-    Str = np.sum(total[36:48, :], axis=0)
-    Pal = np.sum(total[48:56, :], axis=0)
-    Th = np.sum(total[56:69, :], axis=0)
-    Hy = np.sum(total[69:108, :], axis=0)
-    Mb = np.sum(total[108:134, :], axis=0)
-    p = np.sum(total[134:160, :], axis=0)
-    My = np.sum(total[160:196, :], axis=0)
-    Cbx = np.sum(total[196:200, :], axis=0)
-    total_level = np.zeros((12, num))
-    total_level[0,:] = Isocortex
-    total_level[1,:] = Olf
-    total_level[2,:] = Hpf
-    total_level[3,:] = Ctexsp
-    total_level[4,:] = Str
-    total_level[5,:] = Pal
-    total_level[6,:] = Th
-    total_level[7,:] = Hy
-    total_level[8,:] = Mb
-    total_level[9,:] = p
-    total_level[10,:] = My
-    total_level[11,:] = Cbx
-    Region = ['Isocortex', 'OLF', 'HPF', 'CTXsp', 'STR', 'PAL', 'TH', 'HY', 'MB', 'P', 'MY', 'CBX']
-    csv_name = os.path.join(save_csv, 'level2_total_count.csv')
-    first_line = ['Region'] + Stats['con_data_name'] + Stats['es_data_name'] + Stats['sds_data_name']
-    with open(csv_name, 'w+', newline='') as f:
-        csv_write = csv.writer(f, dialect='excel')
-        csv_write.writerow(first_line)
-        for r in range(len(Region)):
-            write_lines = [Region[r], total_level[r,0], total_level[r,1], total_level[r,2], total_level[r,3], total_level[r,4], total_level[r,5], total_level[r,6],
-                            total_level[r,7], total_level[r,8], total_level[r,9], total_level[r,10], total_level[r,11], total_level[r,12], total_level[r,13],
-                            total_level[r,14], total_level[r,15], total_level[r,16], total_level[r,17]]
-            csv_write.writerow(write_lines)
 
 if __name__ == "__main__":
 
